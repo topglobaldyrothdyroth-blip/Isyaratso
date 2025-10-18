@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deteksi Bahasa Isyarat Sederhana</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            background-color: #f0f0f0;
+        }
+        #container {
+            margin: 20px auto;
+            max-width: 800px;
+        }
+        #video {
+            width: 640px;
+            height: 480px;
+            border: 2px solid #333;
+            background-color: black;
+        }
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 640px;
+            height: 480px;
+            pointer-events: none;
+        }
+        #instructions {
+            margin-top: 20px;
+            font-size: 18px;
+        }
+        #status {
+            margin-top: 10px;
+            font-size: 16px;
+            color: #333;
+        }
+        button {
+            margin: 10px;
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1>Deteksi Bahasa Isyarat Menggunakan Kamera</h1>
+        <p>Tunjukkan isyarat tangan di depan kamera:</p>
+        <ul id="instructions">
+            <li><strong>Satu jari (telunjuk)</strong>: "Halo, perkenalkan nama saya Derren"</li>
+            <li><strong>Dua jari (telunjuk + tengah)</strong>: "Saya berasal dari SDN 18 Lubuklinggau"</li>
+            <li><strong>Jempol (ibu jari saja)</strong>: "Salam kenal ya"</li>
+        </ul>
+        <br>
+        <video id="video" autoplay playsinline></video>
+        <canvas id="canvas"></canvas>
+        <br>
+        <button id="startBtn">Mulai Kamera</button>
+        <button id="stopBtn" disabled>Stop Kamera</button>
+        <div id="status">Status: Tunggu untuk memulai...</div>
+    </div>
+
+    <!-- MediaPipe Hands Library -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script>
+        const videoElement = document.getElementById('video');
+        const canvasElement = document.getElementById('canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusElement = document.getElementById('status');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+
+        let camera = null;
+        let hands = null;
+        let isDetecting = false;
+        let lastMessage = ''; // Untuk menghindari pengulangan suara
+
+        // Pesan untuk setiap isyarat
+        const messages = {
+            oneFinger: 'Halo, perkenalkan nama saya Derren',
+            twoFingers: 'Saya berasal dari SDN 18 Lubuklinggau',
+            thumb: 'Salam kenal ya'
+        };
+
+        // Fungsi untuk menghitung jari yang terangkat (berdasarkan landmark MediaPipe)
+        function countRaisedFingers(landmarks) {
+            if (!landmarks || landmarks.length === 0) return 0;
+
+            const fingerTips = [4, 8, 12, 16, 20]; // Thumb tip, index tip, middle tip, ring tip, pinky tip
+            const fingerPips = [2, 5, 9, 13, 17]; // Thumb pip, index pip, middle pip, ring pip, pinky pip
+            let raisedFingers = 0;
+
+            // Thumb (jempol) - khusus, cek jika tip lebih tinggi dari pip (untuk tangan kanan/kiri)
+            const thumbTipY = landmarks[4].y;
+            const thumbPipY = landmarks[2].y;
+            if (thumbTipY < thumbPipY) raisedFingers += 1; // Thumb up jika tip lebih atas
+
+            // Jari lain (index, middle, ring, pinky)
+            for (let i = 1; i < 5; i++) { // Mulai dari index (i=1)
+                const tipY = landmarks[fingerTips[i]].y;
+                const pipY = landmarks[fingerPips[i]].y;
+                if (tipY < pipY) raisedFingers += 1; // Jari up jika tip lebih atas
+            }
+
+            return raisedFingers;
+        }
+
+        // Fungsi untuk mendeteksi jenis isyarat
+        function detectGesture(landmarks) {
+            const totalRaised = countRaisedFingers(landmarks);
+
+            // Logika sederhana:
+            // - Jika hanya thumb (raisedFingers = 1, dan itu thumb)
+            const isOnlyThumb = landmarks && landmarks[4].y < landmarks[2].y && 
+                                landmarks[8].y > landmarks[5].y && // Index down
+                                landmarks[12].y > landmarks[9].y && // Middle down
+                                landmarks[16].y > landmarks[13].y && // Ring down
+                                landmarks[20].y > landmarks[17].y;   // Pinky down
+
+            if (isOnlyThumb) {
+                return 'thumb';
+            }
+
+            // - Satu jari: total 1 (hanya index up, thumb down)
+            if (totalRaised === 1 && landmarks[8].y < landmarks[5].y && // Index up
+                landmarks[4].y > landmarks[2].y) { // Thumb down
+                return 'oneFinger';
+            }
+
+            // - Dua jari: total 2 (index + middle up, others down)
+            if (totalRaised === 2 && landmarks[8].y < landmarks[5].y && // Index up
+                landmarks[12].y < landmarks[9].y && // Middle up
+                landmarks[4].y > landmarks[2].y && // Thumb down
+                landmarks[16].y > landmarks[13].y && // Ring down
+                landmarks[20].y > landmarks[17].y) { // Pinky down
+                return 'twoFingers';
+            }
+
+            return null;
+        }
+
+        // Fungsi untuk memainkan suara
+        function speak(text) {
+            if (lastMessage !== text) {
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = 'id-ID'; // Bahasa Indonesia
+                utterance.rate = 0.8;
+                speechSynthesis.speak(utterance);
+                lastMessage = text;
+                statusElement.textContent = `Status: Mengucapkan: "${text}"`;
+            }
+        }
+
+        // Setup MediaPipe Hands
+        function onResults(results) {
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                for (let index = 0; index < results.multiHandLandmarks.length; index++) {
+                    const landmarks = results.multiHandLandmarks[index];
+                    const handedness = results.multiHandedness[index];
+
+                    // Gambar landmark
+                    window.drawConnectors(canvasCtx, landmarks, window.HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
+                    window.drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 1});
+
+                    // Deteksi gesture
+                    const gesture = detectGesture(landmarks);
+                    if (gesture) {
+                        const message = messages[gesture];
+                        if (message) {
+                            speak(message);
+                        }
+                    }
+                }
+            }
+            canvasCtx.restore();
+        }
+
+        // Inisialisasi detector
+        function initHands() {
+            hands = new window.Hands({
+                locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                }
+            });
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            hands.onResults(onResults);
+        }
+
+        // Mulai kamera
+        startBtn.addEventListener('click', async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+                videoElement.srcObject = stream;
+
+                camera = new window.Camera(videoElement, {
+                    onFrame: async () => {
+                        await hands.send({ image: videoElement });
+                    },
+                    width: 640,
+                    height: 480
+                });
+                await camera.start();
+
+                initHands();
+                isDetecting = true;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                statusElement.textContent = 'Status: Kamera aktif. Tunjukkan isyarat tangan!';
+            } catch (error) {
+                console.error('Error accessing camera:', error);
+                statusElement.textContent = 'Status: Gagal mengakses kamera. Pastikan izin diberikan.';
+            }
+        });
+
+        // Stop kamera
+        stopBtn.addEventListener('click', () => {
+            if (camera) {
+                camera.stop();
+            }
+            videoElement.srcObject = null;
+            isDetecting = false;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            statusElement.textContent = 'Status: Kamera dihentikan.';
+            speechSynthesis.cancel(); // Hentikan suara jika sedang berjalan
+            lastMessage = '';
+        });
+
+        // Resize canvas
+        function resizeCanvas() {
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+        }
+        videoElement.addEventListener('loadedmetadata', resizeCanvas);
+    </script>
+</body>
+</html>
